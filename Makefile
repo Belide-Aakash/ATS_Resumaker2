@@ -1,6 +1,6 @@
 # resumaker - dev tasks. Everything runs through `uv` (never pip).
 .DEFAULT_GOAL := help
-.PHONY: help install lint fmt type test test-live api cli docker-build docker-up docker-down
+.PHONY: help install lint fmt type test test-live verify doctor api cli docker-build docker-up docker-down
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -22,6 +22,12 @@ test:  ## Unit + integration tests (skips live)
 
 test-live:  ## Include tests that hit real providers/network
 	uv run pytest -m live
+
+verify:  ## Governance conformance: recipes/cards well-formed + paired
+	uv run python scripts/verify.py
+
+doctor:  ## Read-only health report + PII scan over the git index
+	uv run python scripts/doctor.py
 
 api:  ## Run the API locally (reload)
 	uv run uvicorn apps.api.main:app --reload --port 8000
