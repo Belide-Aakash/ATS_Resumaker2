@@ -93,6 +93,64 @@ def test_service_dedupes_on_reingest(tmp_db, monkeypatch):
     assert r3.new == 1 and r3.unchanged == 1
 
 
+def test_ingest_routes_a_failed_board_to_errors_not_zero(tmp_db, monkeypatch):
+    """EMPTY vs ERROR (the exact discipline the course grades): a board whose fetch
+    RAISES must land in `res.errors` as a value - it must never silently become "0 jobs"."""
+    class Boom:
+        source = "greenhouse"
+        def list_postings(self, token, **kw):
+            raise RuntimeError("HTTP 403 forbidden")
+
+    monkeypatch.setattr(service, "get_source", lambda name: Boom())
+    company = Company(name="Acme", boards=[BoardRef(source="greenhouse", token="acme")])
+
+    res = service.ingest_company(company)
+    assert res.new == 0                              # nothing recorded
+    assert len(res.errors) == 1                      # the failure is a value, not a 0
+    assert "greenhouse/acme" in res.errors[0]        # provenance: which board failed
+    assert "403" in res.errors[0]
+
+
+def test_ingest_treats_an_empty_board_as_empty_not_error(tmp_db, monkeypatch):
+    """A board that fetches successfully but returns [] is EMPTY, not an ERROR: it must
+    NOT pollute `res.errors`. An empty errors list is the signal the sweep worked and the
+    board genuinely had nothing - the opposite of a silent failure masquerading as 0."""
+    class Empty:
+        source = "greenhouse"
+        def list_postings(self, token, **kw):
+            return []
+
+    monkeypatch.setattr(service, "get_source", lambda name: Empty())
+    company = Company(name="Acme", boards=[BoardRef(source="greenhouse", token="acme")])
+
+    res = service.ingest_company(company)
+    assert res.new == 0
+    assert res.errors == []                          # empty != error
+
+
+def test_one_bad_board_does_not_sink_its_siblings(tmp_db, monkeypatch):
+    """Failure isolation: one board raising routes to `errors` and the sweep keeps going,
+    so a sibling board still ingests. One bad board must not sink the rest."""
+    good = [PostingStub(source="greenhouse", external_id="1", title="ML Engineer",
+                        location="Boston", updated_at="2026-01-01")]
+
+    class Mixed:
+        def list_postings(self, token, **kw):
+            if token == "bad":
+                raise RuntimeError("connection reset")
+            return good
+
+    monkeypatch.setattr(service, "get_source", lambda name: Mixed())
+    company = Company(name="Acme", boards=[
+        BoardRef(source="greenhouse", token="bad"),
+        BoardRef(source="greenhouse", token="good"),
+    ])
+
+    res = service.ingest_company(company)
+    assert res.new == 1                              # the good board still ingested
+    assert len(res.errors) == 1 and "greenhouse/bad" in res.errors[0]
+
+
 def test_ingest_all_skips_companies_off_the_selected_sources(tmp_db, monkeypatch):
     # A narrowed sweep (per-cadence polling) must not even touch companies whose boards are
     # all on other ATSs - otherwise the fast tick's wall-time scales with the whole watchlist
